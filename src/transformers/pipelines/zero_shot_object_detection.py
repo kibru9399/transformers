@@ -144,17 +144,29 @@ class ZeroShotObjectDetectionPipeline(ChunkPipeline):
             postprocess_params["threshold"] = kwargs["threshold"]
         if "top_k" in kwargs:
             postprocess_params["top_k"] = kwargs["top_k"]
+        if "box_threshold" in kwargs:
+            postprocess_params["box_threshold"] = kwargs["box_threshold"]
+        if "text_threshold" in kwargs:
+            postprocess_params["text_threshold"] = kwargs["text_threshold"]
         return preprocess_params, {}, postprocess_params
 
     def preprocess(self, inputs, timeout=None):
         image = load_image(inputs["image"], timeout=timeout)
         candidate_labels = inputs["candidate_labels"]
-        if isinstance(candidate_labels, str):
+        
+        if 'dino' in self.model.config.model_type.lower():
+            if isinstance(candidate_labels, str):
+                candidate_labels = candidate_labels + '.' if not candidate_labels.endswith('.') else candidate_labels                
+            else:
+                candidate_labels  = '. '.join(candidate_labels) + '.'
+            candidate_labels = [candidate_labels]
+        elif 'owl' in self.model.config.model_type.lower() and  isinstance(candidate_labels, str):
             candidate_labels = candidate_labels.split(",")
-
         target_size = torch.tensor([[image.height, image.width]], dtype=torch.int32)
         for i, candidate_label in enumerate(candidate_labels):
             text_inputs = self.tokenizer(candidate_label, return_tensors=self.framework)
+            if 'dino' in self.model.config.model_type.lower():
+                self.input_ids = text_inputs.input_ids 
             image_features = self.image_processor(image, return_tensors=self.framework)
             if self.framework == "pt":
                 image_features = image_features.to(self.torch_dtype)
@@ -170,26 +182,34 @@ class ZeroShotObjectDetectionPipeline(ChunkPipeline):
         target_size = model_inputs.pop("target_size")
         candidate_label = model_inputs.pop("candidate_label")
         is_last = model_inputs.pop("is_last")
-
         outputs = self.model(**model_inputs)
-
         model_outputs = {"target_size": target_size, "candidate_label": candidate_label, "is_last": is_last, **outputs}
         return model_outputs
 
-    def postprocess(self, model_outputs, threshold=0.1, top_k=None):
+    def postprocess(self, model_outputs, threshold=0.1, top_k=None, text_threshold=0.25, box_threshold=0.25):
         results = []
         for model_output in model_outputs:
             label = model_output["candidate_label"]
-            model_output = BaseModelOutput(model_output)
-            outputs = self.image_processor.post_process_object_detection(
-                outputs=model_output, threshold=threshold, target_sizes=model_output["target_size"]
-            )[0]
+            model_output = BaseModelOutput(model_output)             
+            if 'dino' in self.model.config.model_type.lower():
+                outputs = self.image_processor.post_process_grounded_object_detection(
+                    outputs=model_output, input_ids=self.input_ids, box_threshold=box_threshold,
+                    text_threshold=text_threshold, target_sizes=model_output["target_size"],
+                )[0] 
+            else:
+                outputs = self.image_processor.post_process_object_detection(
+                    outputs=model_output, threshold=threshold, target_sizes=model_output["target_size"]
+                )[0] 
 
             for index in outputs["scores"].nonzero():
                 score = outputs["scores"][index].item()
                 box = self._get_bounding_box(outputs["boxes"][index][0])
-
-                result = {"score": score, "label": label, "box": box}
+                
+                if 'dino' in self.model.config.model_type.lower():
+                    label = outputs["labels"][index]
+                    result = {"score": score, "label": self.tokenizer.decode(label), "box": box}                    
+                else:
+                    result = {"score": score, "label": label, "box": box}
                 results.append(result)
 
         results = sorted(results, key=lambda x: x["score"], reverse=True)
