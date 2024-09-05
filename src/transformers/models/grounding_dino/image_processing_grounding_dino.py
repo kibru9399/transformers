@@ -804,6 +804,31 @@ def compute_segments(
                 stuff_memory_list[pred_class] = current_segment_id
 
     return segmentation, segments
+#Copied from transformers.models.grounding_dino.processing_grounding_dino.get_phrases_from_posmap
+def get_phrases_from_posmap(posmaps, input_ids):
+    """Get token ids of phrases from posmaps and input_ids.
+
+    Args:
+        posmaps (`torch.BoolTensor` of shape `(num_boxes, hidden_size)`):
+            A boolean tensor of text-thresholded logits related to the detected bounding boxes.
+        input_ids (`torch.LongTensor`) of shape `(sequence_length, )`):
+            A tensor of token ids.
+    """
+    left_idx = 0
+    right_idx = posmaps.shape[-1] - 1
+
+    # Avoiding altering the input tensor
+    posmaps = posmaps.clone()
+
+    posmaps[:, 0 : left_idx + 1] = False
+    posmaps[:, right_idx:] = False
+
+    token_ids = []
+    for posmap in posmaps:
+        non_zero_idx = posmap.nonzero(as_tuple=True)[0].tolist()
+        token_ids.append([input_ids[i] for i in non_zero_idx])
+
+    return token_ids
 
 
 class GroundingDinoImageProcessor(BaseImageProcessor):
@@ -1533,7 +1558,7 @@ class GroundingDinoImageProcessor(BaseImageProcessor):
 
     # Copied from transformers.models.owlvit.image_processing_owlvit.OwlViTImageProcessor.post_process_object_detection with OwlViT->GroundingDino
     def post_process_object_detection(
-        self, outputs, threshold: float = 0.1, target_sizes: Union[TensorType, List[Tuple]] = None
+        self, outputs, threshold: float = 0.1, target_sizes: Union[TensorType, List[Tuple]] = None, **kwargs
     ):
         """
         Converts the raw output of [`GroundingDinoForObjectDetection`] into final bounding boxes in (top_left_x, top_left_y,
@@ -1560,9 +1585,8 @@ class GroundingDinoImageProcessor(BaseImageProcessor):
                     "Make sure that you pass in as many target sizes as the batch dimension of the logits"
                 )
 
-        probs = torch.max(logits, dim=-1)
-        scores = torch.sigmoid(probs.values)
-        labels = probs.indices
+        probs = torch.sigmoid(logits)  # (batch_size, num_queries, 256)
+        scores = torch.max(probs, dim=-1)[0]  # (batch_size, num_queries)
 
         # Convert to [x0, y0, x1, y1] format
         boxes = center_to_corners_format(boxes)
@@ -1578,11 +1602,15 @@ class GroundingDinoImageProcessor(BaseImageProcessor):
             scale_fct = torch.stack([img_w, img_h, img_w, img_h], dim=1).to(boxes.device)
             boxes = boxes * scale_fct[:, None, :]
 
+
+        box_threshold, text_threshold = kwargs['text_threshold'], kwargs['text_threshold']
+        input_ids = kwargs['input_ids']
         results = []
-        for s, l, b in zip(scores, labels, boxes):
-            score = s[s > threshold]
-            label = l[s > threshold]
-            box = b[s > threshold]
-            results.append({"scores": score, "labels": label, "boxes": box})
+        for idx, (s, b, p) in enumerate(zip(scores, boxes, probs)):
+            score = s[s > box_threshold]
+            box = b[s > box_threshold]
+            prob = p[s > box_threshold]
+            label_ids = get_phrases_from_posmap(prob > text_threshold, input_ids[idx])
+            results.append({"scores": score, "labels": label_ids, "boxes": box})
 
         return results
