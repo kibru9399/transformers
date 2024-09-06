@@ -229,3 +229,25 @@ class ZeroShotObjectDetectionPipelineTests(unittest.TestCase):
                 {"score": 0.277, "label": "remote", "box": {"xmin": 40, "ymin": 72, "xmax": 177, "ymax": 115}},
             ],
         )
+
+    @require_torch
+    def test_dino_pt(self):
+        object_detector = pipeline(
+            "zero-shot-object-detection", model="IDEA-Research/grounding-dino-tiny"
+        )
+
+        outputs = object_detector(
+            "./tests/fixtures/tests_samples/COCO/000000039769.png",
+            candidate_labels=["a cat", "a remote control"],
+            box_threshold=0.4, 
+            text_threshold=0.3
+        )
+
+        self.assertEqual(
+            nested_simplify(outputs, decimals=4),
+            [
+                {'score': 0.4785 , 'label': 'a cat', 'box': {'xmin': 344, 'ymin': 23, 'xmax': 637, 'ymax': 374}},
+                {'score': 0.4761, 'label': 'a remote control', 'box': {'xmin': 38, 'ymin': 70, 'xmax': 176, 'ymax': 118}},
+                {'score': 0.4379,'label': 'a cat', 'box': {'xmin': 12, 'ymin': 51, 'xmax': 316, 'ymax': 472}}
+            ],
+        )
